@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data files
+data/*.parquet
+data/*.csv
+data/*.json
+data/*.jsonl
+
+# Vector database / indexes
+artifacts/
+*.faiss
+*.index
+*.pkl
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
