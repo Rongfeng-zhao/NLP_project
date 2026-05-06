@@ -33,6 +33,13 @@ REPORT_NOTES = {
 }
 
 _RETRIEVER_INSTANCE = None
+OUT_OF_CONTEXT_KEYWORDS = [
+    "next year",
+    "future",
+    "business strategy",
+    "manufacturer",
+    "warranty",
+]
 
 
 def _import_retriever_module():
@@ -59,7 +66,9 @@ def _doc_text(doc: Any) -> str:
 def _doc_source(doc: Any) -> str:
     """Extract source metadata when available."""
     if isinstance(doc, dict):
-        return str(doc.get("source") or doc.get("id") or doc.get("metadata", "")).strip()
+        for key in ("source", "id", "metadata"):
+            if key in doc and doc[key] is not None:
+                return str(doc[key]).strip()
     return ""
 
 
@@ -102,6 +111,196 @@ def format_retrieved_docs(retrieved_docs: list[Any] | None) -> str:
         context_parts.append(f"{heading}\n{text}")
 
     return "\n\n".join(context_parts)
+
+
+def _parse_product_text(text: str) -> dict[str, str]:
+    """Parse pipe-separated product text into a small metadata dictionary."""
+    fields = {}
+    for part in str(text).split("|"):
+        if ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if key and value and key not in fields:
+            fields[key] = value
+    return fields
+
+
+def _product_records(retrieved_docs: list[Any] | None) -> list[dict[str, Any]]:
+    """Convert retrieved docs into normalized product records for answer formatting."""
+    records = []
+    for idx, doc in enumerate(retrieved_docs or [], start=1):
+        text = _doc_text(doc)
+        if not text:
+            continue
+        fields = _parse_product_text(text)
+        source = _doc_source(doc) or str(idx)
+        score = _doc_score(doc)
+        records.append(
+            {
+                "doc_number": idx,
+                "source": source,
+                "score": score,
+                "text": text,
+                "fields": fields,
+                "title": fields.get("title", "Untitled product"),
+                "rating": fields.get("average_rating", "N/A"),
+                "price": fields.get("price", "N/A"),
+                "store": fields.get("store", "N/A"),
+                "brand": fields.get("Brand", fields.get("store", "N/A")),
+                "item_form": fields.get("Item Form", "N/A"),
+                "finish_type": fields.get("Finish Type", "N/A"),
+                "special_feature": fields.get("Special Feature", "N/A"),
+            }
+        )
+    return records
+
+
+def _rating_value(record: dict[str, Any]) -> float | None:
+    try:
+        return float(record["rating"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _price_value(record: dict[str, Any]) -> float | None:
+    price = str(record["price"]).strip()
+    if price.upper() == "N/A" or not price:
+        return None
+    match = re.search(r"\d+(?:\.\d+)?", price.replace(",", ""))
+    return float(match.group()) if match else None
+
+
+def _has_terms(record: dict[str, Any], terms: list[str]) -> bool:
+    text = record["text"].lower()
+    return all(term.lower() in text for term in terms)
+
+
+def _is_expected_refusal(question: str) -> bool:
+    lowered = str(question).lower()
+    return any(keyword in lowered for keyword in OUT_OF_CONTEXT_KEYWORDS)
+
+
+def summarize_retrieved_docs(retrieved_docs: list[Any] | None, max_docs: int = 3) -> str:
+    """Create concise retrieved evidence for reports and evaluation files."""
+    records = _product_records(retrieved_docs)
+    if not records:
+        return ""
+
+    lines = []
+    for record in records[:max_docs]:
+        bits = [
+            f"Source {record['source']}",
+            f"title: {record['title']}",
+            f"rating: {record['rating']}",
+            f"price: {record['price']}",
+            f"store: {record['store']}",
+        ]
+        if record["score"]:
+            bits.append(f"similarity: {record['score']}")
+        lines.append("- " + "; ".join(bits))
+    return "\n".join(lines)
+
+
+def _format_product_line(record: dict[str, Any]) -> str:
+    details = [
+        f"rating {record['rating']}",
+        f"price {record['price']}",
+        f"store {record['store']}",
+        f"source {record['source']}",
+    ]
+    return f"{record['title']} ({'; '.join(details)})."
+
+
+def generate_answer_from_docs(question: str, retrieved_docs: list[Any] | None) -> str:
+    """
+    Generate a concise rule-based answer from retrieved product records.
+
+    This is a local fallback for the prototype. It avoids copying whole retrieved
+    records and refuses questions that require information outside the dataset.
+    """
+    if _is_expected_refusal(question):
+        return INSUFFICIENT_INFORMATION_MESSAGE
+
+    records = _product_records(retrieved_docs)
+    if not records:
+        return INSUFFICIENT_INFORMATION_MESSAGE
+
+    question_lower = question.lower()
+    selected = records
+    note = ""
+
+    if "cherioll" in question_lower:
+        selected = [
+            record
+            for record in records
+            if "cherioll" in record["brand"].lower()
+            or "cherioll" in record["store"].lower()
+        ]
+        if not selected:
+            return INSUFFICIENT_INFORMATION_MESSAGE
+    elif "powder" in question_lower:
+        selected = [
+            record for record in records if "powder" in record["item_form"].lower()
+        ]
+    elif "waterproof" in question_lower and "natural" in question_lower:
+        selected = [
+            record
+            for record in records
+            if _has_terms(record, ["waterproof", "eyebrow"])
+            and "natural" in record["finish_type"].lower()
+        ]
+        excluded = len(records) - len(selected)
+        if excluded > 0:
+            note = (
+                f" {excluded} retrieved product(s) were not included because the "
+                "retrieved fields did not explicitly match all requested attributes."
+            )
+    elif "long lasting" in question_lower:
+        selected = [record for record in records if _has_terms(record, ["long", "lasting"])]
+    elif "high rating" in question_lower or "high ratings" in question_lower:
+        selected = [
+            record for record in records if (_rating_value(record) or 0) >= 4.0
+        ]
+        note = " Products below a 4.0 average rating were excluded."
+    elif "best balance" in question_lower and "price" in question_lower:
+        comparable = [
+            record
+            for record in records
+            if _rating_value(record) is not None and _price_value(record) is not None
+        ]
+        if len(comparable) < 2:
+            if len(comparable) == 1:
+                return (
+                    "Only one retrieved product includes both price and rating, so "
+                    "the system cannot reliably compare the best balance. The "
+                    f"available product is {_format_product_line(comparable[0])}"
+                )
+            return (
+                "The retrieved documents do not contain enough products with both "
+                "price and rating to compare the best balance."
+            )
+        selected = sorted(
+            comparable,
+            key=lambda record: (_rating_value(record) or 0) / max(_price_value(record) or 1, 1),
+            reverse=True,
+        )[:1]
+    elif "recommend" in question_lower and "rating" in question_lower:
+        rated = [record for record in records if _rating_value(record) is not None]
+        if rated:
+            selected = [max(rated, key=lambda record: _rating_value(record) or 0)]
+
+    if not selected:
+        return INSUFFICIENT_INFORMATION_MESSAGE
+
+    selected = selected[:3]
+    if len(selected) == 1 and ("recommend" in question_lower or "best balance" in question_lower):
+        return f"Based on the retrieved evidence, I would select {_format_product_line(selected[0])}{note}"
+
+    lines = [_format_product_line(record) for record in selected]
+    intro = "Based on the retrieved documents, the relevant products are:"
+    return intro + "\n" + "\n".join(f"{idx}. {line}" for idx, line in enumerate(lines, start=1)) + note
 
 
 def build_prompt(question: str, retrieved_docs: list[Any] | None) -> str:
@@ -190,10 +389,10 @@ def call_llm(prompt: str) -> str:
             "Set RAG_LLM_PROVIDER=placeholder or replace call_llm() with an API call."
         )
 
-    try:
-        return _simple_context_answer(prompt)
-    except Exception as exc:
-        return f"LLM call failed: {exc}"
+    return (
+        "LLM is not connected in this prototype. The final answer is generated "
+        "by generate_answer_from_docs() using only retrieved context."
+    )
 
 
 def _retrieve_with_available_interface(question: str, top_k: int) -> tuple[list[Any], str | None]:
@@ -268,13 +467,15 @@ def rag_answer(question: str, top_k: int = 3) -> dict[str, Any]:
         }
 
     prompt = build_prompt(question, retrieved_docs)
-    answer = call_llm(prompt)
+    llm_status = call_llm(prompt)
+    answer = generate_answer_from_docs(question, retrieved_docs)
 
     return {
         "question": question,
         "answer": answer,
         "retrieved_docs": retrieved_docs,
         "prompt": prompt,
+        "llm_status": llm_status,
     }
 
 

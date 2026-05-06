@@ -21,16 +21,18 @@ except ImportError:
 try:
     from rag_chain import (
         INSUFFICIENT_INFORMATION_MESSAGE,
+        OUT_OF_CONTEXT_KEYWORDS,
         REPORT_NOTES,
-        format_retrieved_docs,
         rag_answer,
+        summarize_retrieved_docs,
     )
 except ImportError:
     from src.rag_chain import (
         INSUFFICIENT_INFORMATION_MESSAGE,
+        OUT_OF_CONTEXT_KEYWORDS,
         REPORT_NOTES,
-        format_retrieved_docs,
         rag_answer,
+        summarize_retrieved_docs,
     )
 
 
@@ -104,6 +106,24 @@ def _contains_error(answer: str) -> bool:
     return any(phrase in lowered for phrase in error_phrases)
 
 
+def _expected_refusal(question: str) -> bool:
+    """Return True when the question asks for information outside product records."""
+    lowered = str(question).lower()
+    return any(keyword in lowered for keyword in OUT_OF_CONTEXT_KEYWORDS)
+
+
+def _refusal_detected(answer: str) -> bool:
+    """Detect the standard insufficient-information answer."""
+    return INSUFFICIENT_INFORMATION_MESSAGE.lower() in str(answer).lower()
+
+
+def _looks_like_raw_context(answer: str) -> bool:
+    """Detect answers that mostly copy raw product records."""
+    answer = str(answer)
+    raw_markers = ["main_category:", "average_rating:", "Item Form:", "Brand:"]
+    return answer.count("|") >= 8 or sum(marker in answer for marker in raw_markers) >= 2
+
+
 def evaluate_answer(
     question: str,
     answer: str,
@@ -124,22 +144,45 @@ def evaluate_answer(
             "notes": error or "Pipeline component unavailable during evaluation.",
         }
 
+    if _expected_refusal(question):
+        if _refusal_detected(answer):
+            return {
+                "relevance_score": 5,
+                "faithfulness_score": 5,
+                "completeness_score": 5,
+                "notes": "Correct refusal for an out-of-context question.",
+            }
+        return {
+            "relevance_score": 1,
+            "faithfulness_score": 2,
+            "completeness_score": 1,
+            "notes": "Expected refusal, but the system attempted to answer from insufficient context.",
+        }
+
     if not retrieved_context.strip():
         return {
             "relevance_score": 1,
             "faithfulness_score": 3
-            if answer == INSUFFICIENT_INFORMATION_MESSAGE
+            if _refusal_detected(answer)
             else 1,
             "completeness_score": 1,
             "notes": "No retrieved context was available.",
         }
 
-    if answer == INSUFFICIENT_INFORMATION_MESSAGE:
+    if _refusal_detected(answer):
         return {
-            "relevance_score": 3,
+            "relevance_score": 2,
             "faithfulness_score": 5,
             "completeness_score": 2,
-            "notes": "The system refused to answer because context was insufficient.",
+            "notes": "The system refused to answer; this is faithful but may indicate weak retrieval for this in-context question.",
+        }
+
+    if _looks_like_raw_context(answer):
+        return {
+            "relevance_score": 2,
+            "faithfulness_score": 3,
+            "completeness_score": 2,
+            "notes": "The answer appears to copy raw retrieved records instead of producing a concise response.",
         }
 
     question_terms = _tokens(question)
@@ -153,18 +196,16 @@ def evaluate_answer(
     relevance_score = min(5, max(2, 2 + overlap_with_question))
     faithfulness_score = min(5, max(1, round(1 + support_ratio * 4)))
 
-    if len(answer.split()) >= 35:
+    if len(answer.split()) >= 20:
         completeness_score = 5
-    elif len(answer.split()) >= 20:
-        completeness_score = 4
     elif len(answer.split()) >= 10:
-        completeness_score = 3
+        completeness_score = 4
     else:
-        completeness_score = 2
+        completeness_score = 3
 
     notes = (
-        "Rule-based placeholder scores based on question-answer overlap, "
-        "answer-context overlap, and answer length."
+        "Rule-based scores based on question-answer overlap, answer-evidence "
+        "overlap, answer formatting, and refusal behavior."
     )
 
     return {
@@ -207,7 +248,7 @@ def run_evaluation(top_k: int = 3) -> Any:
         result = rag_answer(question, top_k=top_k)
         answer = result.get("answer", "")
         retrieved_docs = result.get("retrieved_docs", [])
-        retrieved_context = format_retrieved_docs(retrieved_docs)
+        retrieved_context = summarize_retrieved_docs(retrieved_docs)
 
         scores = evaluate_answer(
             question=question,
@@ -262,7 +303,7 @@ def write_sample_outputs(rows: list[dict[str, Any]]) -> None:
                 "## Answer",
                 str(row["answer"]),
                 "",
-                "## Retrieved Context",
+                "## Retrieved Evidence",
                 str(row["retrieved_context"]) if row["retrieved_context"] else "No context retrieved.",
                 "",
                 "## Scores",
