@@ -85,3 +85,6 @@ typer==0.25.1
 typing_extensions==4.15.0
 tzdata==2026.2
 wcwidth==0.6.0
+streamlit
+openai
+python-dotenv

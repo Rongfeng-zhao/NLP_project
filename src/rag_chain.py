@@ -395,6 +395,47 @@ def call_llm(prompt: str) -> str:
     )
 
 
+def call_deepseek(prompt: str) -> str:
+    """
+    Call DeepSeek through the OpenAI-compatible Python SDK.
+
+    Required environment variables:
+    - DEEPSEEK_API_KEY
+    - DEEPSEEK_MODEL, optional, default deepseek-v4-flash
+    """
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise ValueError("DEEPSEEK_API_KEY is not set.")
+
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise ImportError(
+            "The openai package is required for DeepSeek generation. "
+            "Install it with: pip install openai"
+        ) from exc
+
+    model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a document-based question-answering assistant. "
+                    "Use only the provided retrieved context. Do not use external "
+                    "knowledge. If the context is insufficient, return the exact "
+                    f"sentence: {INSUFFICIENT_INFORMATION_MESSAGE}"
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0,
+    )
+    return response.choices[0].message.content.strip()
+
+
 def _retrieve_with_available_interface(question: str, top_k: int) -> tuple[list[Any], str | None]:
     """
     Retrieve documents while supporting multiple possible Member 2 interfaces.
@@ -424,7 +465,7 @@ def _retrieve_with_available_interface(question: str, top_k: int) -> tuple[list[
         )
 
 
-def rag_answer(question: str, top_k: int = 3) -> dict[str, Any]:
+def rag_answer(question: str, top_k: int = 3, use_deepseek: bool = True) -> dict[str, Any]:
     """
     Main RAG pipeline:
     1. Retrieve top-k relevant documents
@@ -439,6 +480,7 @@ def rag_answer(question: str, top_k: int = 3) -> dict[str, Any]:
             "answer": "Question cannot be empty.",
             "retrieved_docs": [],
             "prompt": prompt,
+            "generation_mode": "error",
             "error": "Question cannot be empty.",
         }
 
@@ -453,6 +495,7 @@ def rag_answer(question: str, top_k: int = 3) -> dict[str, Any]:
             "answer": retrieval_error,
             "retrieved_docs": retrieved_docs,
             "prompt": prompt,
+            "generation_mode": "error",
             "error": retrieval_error,
         }
 
@@ -463,18 +506,32 @@ def rag_answer(question: str, top_k: int = 3) -> dict[str, Any]:
             "answer": INSUFFICIENT_INFORMATION_MESSAGE,
             "retrieved_docs": [],
             "prompt": prompt,
+            "generation_mode": "rule_based",
             "error": "No documents were retrieved.",
         }
 
     prompt = build_prompt(question, retrieved_docs)
-    llm_status = call_llm(prompt)
-    answer = generate_answer_from_docs(question, retrieved_docs)
+    if use_deepseek:
+        try:
+            answer = call_deepseek(prompt)
+            generation_mode = "deepseek"
+        except Exception as exc:
+            answer = generate_answer_from_docs(question, retrieved_docs)
+            generation_mode = "fallback_rule_based"
+            llm_status = f"DeepSeek generation failed: {exc}"
+        else:
+            llm_status = "DeepSeek generation succeeded."
+    else:
+        answer = generate_answer_from_docs(question, retrieved_docs)
+        generation_mode = "rule_based"
+        llm_status = call_llm(prompt)
 
     return {
         "question": question,
         "answer": answer,
         "retrieved_docs": retrieved_docs,
         "prompt": prompt,
+        "generation_mode": generation_mode,
         "llm_status": llm_status,
     }
 
