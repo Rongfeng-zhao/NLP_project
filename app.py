@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from src.rag_chain import rag_answer, summarize_retrieved_docs
 
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(".env"), override=True)
 
 
 def _doc_text(doc: Any) -> str:

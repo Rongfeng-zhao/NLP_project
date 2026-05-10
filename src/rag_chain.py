@@ -403,6 +403,14 @@ def call_deepseek(prompt: str) -> str:
     - DEEPSEEK_API_KEY
     - DEEPSEEK_MODEL, optional, default deepseek-v4-flash
     """
+    try:
+        from dotenv import load_dotenv
+
+        project_root = Path(__file__).resolve().parents[1]
+        load_dotenv(dotenv_path=project_root / ".env", override=True)
+    except ImportError:
+        pass
+
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         raise ValueError("DEEPSEEK_API_KEY is not set.")
